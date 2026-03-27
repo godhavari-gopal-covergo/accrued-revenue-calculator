@@ -1,0 +1,9 @@
+node_modules/
+runs/
+intermediate/
+output/
+auth/credentials.env
+auth/current-token.txt
+*.local.env
+.env
+.DS_Store

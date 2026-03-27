@@ -1,0 +1,13 @@
+fragment result on token {
+  accessToken
+  refreshToken
+  expiresIn
+  error
+  errorDescription
+}
+
+query token($tenantId: String!, $clientId: String!, $username: String!, $password: String!) {
+  token: token_2(tenantId: $tenantId, clientId: $clientId, username: $username, password: $password) {
+    ...result
+  }
+}

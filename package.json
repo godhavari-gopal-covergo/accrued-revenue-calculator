@@ -1,0 +1,22 @@
+{
+  "name": "accrued-revenue",
+  "version": "1.0.0",
+  "description": "Earned Premium ETL — Stage 1 extraction + Stage 2 JSONata calculation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/godhavari-gopal-covergo/accrued-revenue-calculator.git"
+  },
+  "scripts": {
+    "extract": "npx ts-node extract-policy.ts",
+    "calculate": "npx ts-node calculate-earned-premium.ts",
+    "fetch-token": "npx ts-node auth/fetch-token.ts"
+  },
+  "dependencies": {
+    "jsonata": "^2.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}

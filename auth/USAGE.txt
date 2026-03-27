@@ -1,0 +1,21 @@
+Token refresh (separate from Stage 1 / Stage 2 scripts)
+
+1) Copy credentials.example.env -> credentials.env and set COVERGO_AUTH_BEARER,
+   COVERGO_USERNAME, COVERGO_PASSWORD (and adjust endpoint if needed).
+
+2) From AccruedRevenue directory:
+
+     npm run fetch-token
+
+   Writes the new access token to auth/current-token.txt (gitignored) and prints it.
+
+3) Stage 1 — either export the token or pass it explicitly:
+
+     export COVERGO_BEARER_TOKEN="$(cat auth/current-token.txt)"
+     npm run extract -- --policyId ... --endpoint ...
+
+   Or:  --token "$(cat auth/current-token.txt)"
+
+COVERGO_AUTH_BEARER is the Authorization header used only for the token_2 GraphQL call
+(often a guest/session JWT from the admin UI). When that JWT expires, obtain a new one
+from the browser network tab the same way you captured the original curl.
