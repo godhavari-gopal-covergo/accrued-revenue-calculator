@@ -1,0 +1,340 @@
+(
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  PAID EARNED PREMIUM — JSONata Transformation
+   *
+   *  Input:  One staging document from stg_earned_premium collection
+   *  Output: One JSONL line conforming to earned-premium-output.schema.json
+   *
+   *  Custom function bindings required (registered in the ETL runtime):
+   *    $daysBetween(d1, d2)  → integer (days between two ISO dates)
+   *    $maxDate(d1, d2)      → string  (later of two ISO dates)
+   *    $minDate(d1, d2)      → string  (earlier of two ISO dates)
+   *    $daysInMonth(y, m)    → integer (days in given month)
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  /* ─── Reporting period boundaries ─── */
+  $reportStart := reportingPeriod.startDate;
+  $reportEnd   := reportingPeriod.endDate;
+  $reportYear  := reportingPeriod.year;
+  $reportMonth := reportingPeriod.month;
+  $daysInReportMonth := $daysInMonth($reportYear, $reportMonth);
+
+  /* ─── Policy active window within reporting month ─── */
+  $policyStart := policy.startDate;
+  $policyEnd   := policy.cancellationDate != null ? policy.cancellationDate
+                : (policy.terminationDate != null ? policy.terminationDate
+                : policy.endDate);
+
+  $activeFrom := $maxDate($policyStart, $reportStart);
+  $activeTo   := $minDate($policyEnd, $reportEnd);
+  $policyActiveDays := (
+    $d := $daysBetween($activeFrom, $activeTo) + 1;
+    $d > 0 ? $d : 0
+  );
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  HELPER: Is an installment "paid"?
+   *
+   *  Checks four evidence sources:
+   *    1. Installment status = COLLECTED
+   *    2. Linked invoice status = PAID or OVERPAID
+   *    3. Active (non-reversed) receipt exists against linked invoice
+   *    4. Successful payment in endpoint-2 data matches invoice number
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $isPaid := function($inst) {(
+    $instId := $inst.installmentId;
+
+    /* Check 1: Direct installment status */
+    $inst.status = "COLLECTED"
+
+    /* Check 2: Invoice paid */
+    or $count(invoices[installmentId = $instId and status in ["PAID", "OVERPAID"]]) > 0
+
+    /* Check 3: Non-reversed receipt against invoice */
+    or (
+      $linkedInvoiceIds := invoices[installmentId = $instId].invoiceId;
+      $count(
+        receipts[
+          status = "CREATED"
+          and $count(entities[entityId in $linkedInvoiceIds]) > 0
+        ]
+      ) > 0
+    )
+
+    /* Check 4: Successful payment matching invoice number */
+    or (
+      $linkedInvoiceNums := invoices[installmentId = $instId].invoiceNumber;
+      $count(
+        payments[
+          status = "SUCCEEDED"
+          and invoiceNumber in $linkedInvoiceNums
+        ]
+      ) > 0
+    )
+  )};
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  HELPER: Overlap days between two date ranges
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $overlapDays := function($fromA, $toA, $fromB, $toB) {(
+    $start := $maxDate($fromA, $fromB);
+    $end   := $minDate($toA, $toB);
+    $d     := $daysBetween($start, $end) + 1;
+    $d > 0 ? $d : 0
+  )};
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  CORE: Per-installment earned premium (CHARGE type only)
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $installmentEarned := installments[
+    installmentType = "CHARGE"
+    and fromDate <= $reportEnd
+    and toDate >= $reportStart
+  ] ~> $map(function($inst) {(
+
+    $instFrom := $inst.fromDate;
+    $instTo   := $inst.toDate;
+    $instDays := $daysBetween($instFrom, $instTo) + 1;
+    $instDays := $instDays > 0 ? $instDays : 1;
+
+    $instPremium          := $inst.totalPremium;
+    $instPremiumBeforeTax := $inst.premiumBeforeTax;
+    $instTax              := $inst.tax;
+    $instFee              := $inst.fee;
+
+    /* Flat daily rates from installment amounts */
+    $dailyRate          := $instPremium / $instDays;
+    $dailyRateBeforeTax := $instPremiumBeforeTax / $instDays;
+    $dailyTaxRate       := $instTax / $instDays;
+    $dailyFeeRate       := $instFee / $instDays;
+
+    /* 2dp rates — same as displayed; grossEarned uses these so days × rate matches the report */
+    $dailyRate2          := $round($dailyRate, 2);
+    $dailyRateBeforeTax2 := $round($dailyRateBeforeTax, 2);
+    $dailyTaxRate2       := $round($dailyTaxRate, 2);
+    $dailyFeeRate2       := $round($dailyFeeRate, 2);
+
+    /* Days this installment overlaps with reporting month */
+    $overlapWithMonth := $overlapDays($instFrom, $instTo, $reportStart, $reportEnd);
+
+    /* Constrain to policy active period within the reporting month */
+    $effectiveFrom := $maxDate($maxDate($instFrom, $reportStart), $activeFrom);
+    $effectiveTo   := $minDate($minDate($instTo, $reportEnd), $activeTo);
+    $effectiveDays := (
+      $d := $daysBetween($effectiveFrom, $effectiveTo) + 1;
+      $d > 0 ? $d : 0
+    );
+
+    /* ─── Timeline-aware earned calculation ───
+     * If premiumTimeline segments exist, use segment-specific daily rates
+     * for the portion of THIS installment that falls in EACH segment
+     * within the reporting month. This handles variable premium across
+     * endorsement boundaries.
+     */
+    $timelineEarned := $count(premiumTimeline) > 0 ? (
+      premiumTimeline ~> $map(function($seg) {(
+        /* Intersection of: timeline segment ∩ installment ∩ reporting month ∩ policy active */
+        $segFrom := $maxDate($maxDate($maxDate($seg.effectiveFrom, $instFrom), $reportStart), $activeFrom);
+        $segTo   := $minDate($minDate($minDate($seg.effectiveTo, $instTo), $reportEnd), $activeTo);
+        $segDays := $daysBetween($segFrom, $segTo) + 1;
+        $segDays > 0 ? $segDays * $round($seg.dailyRate, 2) : 0
+      )}) ~> $sum
+    ) : (
+      /* No timeline — use installment flat daily rate (2dp, matches displayed dailyRate) */
+      $effectiveDays * $dailyRate2
+    );
+
+    /* ─── Scale factor: keep tax/fee breakdown proportional to timeline grossEarned ─── */
+    $flatEarned := $effectiveDays * $dailyRate2;
+    $scaleFactor := $flatEarned != 0 ? $timelineEarned / $flatEarned : 1;
+
+    /* ─── Paid qualification ─── */
+    $paid := $isPaid($inst);
+
+    {
+      "installmentId":        $inst.installmentId,
+      "endorsementId":        $inst.endorsementId,
+      "fromDate":             $instFrom,
+      "toDate":               $instTo,
+      "installmentTimingType": $inst.installmentTimingType,
+      "installmentDays":      $instDays,
+      "overlapDays":          $overlapWithMonth,
+      "effectiveDays":        $effectiveDays,
+      "dailyRate":            $dailyRate2,
+      "dailyRateBeforeTax":   $dailyRateBeforeTax2,
+      "grossEarned":          $round($timelineEarned, 2),
+      "earnedBeforeTax":      $round($effectiveDays * $dailyRateBeforeTax2 * $scaleFactor, 2),
+      "earnedTax":            $round($effectiveDays * $dailyTaxRate2 * $scaleFactor, 2),
+      "earnedFee":            $round($effectiveDays * $dailyFeeRate2 * $scaleFactor, 2),
+      "isPaid":               $paid,
+      "installmentStatus":    $inst.status,
+      "paidEarned":           $paid ? $round($timelineEarned, 2) : 0,
+      "unpaidEarned":         $paid ? 0 : $round($timelineEarned, 2)
+    }
+  )});
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  REFUND installments (installmentType = REFUND)
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $refundInstallmentEarned := installments[
+    installmentType = "REFUND"
+    and fromDate <= $reportEnd
+    and toDate >= $reportStart
+  ] ~> $map(function($inst) {(
+    $instDays := $daysBetween($inst.fromDate, $inst.toDate) + 1;
+    $instDays := $instDays > 0 ? $instDays : 1;
+    $overlap  := $overlapDays($inst.fromDate, $inst.toDate, $reportStart, $reportEnd);
+    $dailyRate := $inst.totalPremium / $instDays;
+    {
+      "installmentId":        $inst.installmentId,
+      "type":                 "REFUND",
+      "installmentTimingType": $inst.installmentTimingType,
+      "fromDate":             $inst.fromDate,
+      "toDate":               $inst.toDate,
+      "overlapDays":          $overlap,
+      "refundAmount":         $round($abs($overlap * $dailyRate), 2)
+    }
+  )});
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  ADHOC refund notes (not tied to installments)
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $adhocRefunds := refunds[
+    createdAt >= $reportStart
+    and createdAt <= $reportEnd
+    and (installmentId = null or installmentId = "")
+  ] ~> $map(function($r) {(
+    {
+      "refundId":         $r.refundId,
+      "refundNumber":     $r.refundNumber,
+      "total":            $r.total,
+      "premiumBeforeTax": $r.premiumBeforeTax,
+      "tax":              $r.tax,
+      "status":           $r.status
+    }
+  )});
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  PRIOR PERIOD ADJUSTMENTS (pre-computed by extraction orchestrator)
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $priorAdjustments := priorPeriodAdjustments ~> $map(function($adj) {(
+    {
+      "originalPeriod":          $adj.originalReportingPeriod,
+      "endorsementId":           $adj.endorsementId,
+      "endorsementEffectiveDate": $adj.endorsementEffectiveDate,
+      "adjustmentType":          $adj.adjustmentType,
+      "previouslyReported":      $adj.previouslyReportedEarned,
+      "revised":                 $adj.revisedEarned,
+      "delta":                   $adj.delta,
+      "daysAffected":            $adj.daysAffected,
+      "explanation":             $adj.explanation
+    }
+  )});
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  AGGREGATIONS
+   * ═══════════════════════════════════════════════════════════════════════ */
+  /* Wrap in $append([], x) to guarantee arrays — JSONata returns a bare object
+     for single-match filters and undefined for no-match, both of which break $sum */
+  $asArray := function($x) { $type($x) = "array" ? $x : $x ? [$x] : [] };
+
+  $totalGrossEarned        := $sum($asArray($installmentEarned).grossEarned);
+  $totalPaidEarned         := $sum($asArray($installmentEarned).paidEarned);
+  $totalUnpaidEarned       := $sum($asArray($installmentEarned).unpaidEarned);
+  $refundInstSum           := $sum($asArray($refundInstallmentEarned).refundAmount);
+  $adhocRefundSum          := $sum($asArray($adhocRefunds).total);
+  $totalRefunds            := ($refundInstSum ? $refundInstSum : 0)
+                            + ($adhocRefundSum ? $adhocRefundSum : 0);
+  $totalPriorAdjustments   := $sum($asArray($priorAdjustments).delta);
+  $totalPriorAdjustments   := $totalPriorAdjustments ? $totalPriorAdjustments : 0;
+  $netPaidEarned           := $totalPaidEarned - $totalRefunds + $totalPriorAdjustments;
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  FORMAT PERIOD HELPER
+   * ═══════════════════════════════════════════════════════════════════════ */
+  $periodStr := $string($reportYear) & "-" & $pad($string($reportMonth), -2, "0");
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   *  FINAL OUTPUT — one JSONL line per policy
+   * ═══════════════════════════════════════════════════════════════════════ */
+  {
+    "reportType": "PAID_EARNED_PREMIUM",
+    "reportingPeriod": $periodStr,
+    "reportingPeriodStart": $reportStart,
+    "reportingPeriodEnd": $reportEnd,
+    "generatedAt": $now(),
+
+    "policy": {
+      "policyId":         policy.policyId,
+      "policyNumber":     policy.policyNumber,
+      "status":           policy.status,
+      "startDate":        policy.startDate,
+      "endDate":          policy.endDate,
+      "cancellationDate": policy.cancellationDate,
+      "terminationDate":  policy.terminationDate,
+      "billingFrequency": policy.billingFrequency,
+      "currency":         policy.currency,
+      "productId":        policy.productId,
+      "productName":      policy.productName,
+      "paidToDate":       policy.paidToDate
+    },
+
+    "contractHolder": {
+      "payorId": contractHolder.payorId,
+      "name":    contractHolder.name
+    },
+
+    "summary": {
+      "policyActiveDaysInMonth":    $policyActiveDays,
+      "daysInMonth":                $daysInReportMonth,
+      "totalGrossEarned":           $round($totalGrossEarned, 2),
+      "totalPaidEarned":            $round($totalPaidEarned, 2),
+      "totalUnpaidDeferred":        $round($totalUnpaidEarned, 2),
+      "totalRefunds":               $round($totalRefunds, 2),
+      "totalPriorPeriodAdjustments": $round($totalPriorAdjustments, 2),
+      "netPaidEarnedPremium":       $round($netPaidEarned, 2)
+    },
+
+    "installmentDetails": $asArray($installmentEarned),
+
+    "refundDetails": {
+      "installmentRefunds": $asArray($refundInstallmentEarned),
+      "adhocRefunds":       $asArray($adhocRefunds)
+    },
+
+    "priorPeriodAdjustments": $asArray($priorAdjustments),
+
+    "premiumTimeline": premiumTimeline,
+
+    "endorsementsSummary": $asArray(
+      $asArray(endorsements) ~> $map(function($e) {(
+        {
+          "endorsementId":    $e.endorsementId,
+          "type":             $e.type,
+          "effectiveDate":    $e.effectiveDate,
+          "status":           $e.status,
+          "hasBackdatedImpact": $e.effectiveDate < $reportStart,
+          "billingImpact": {
+            "newInstallments":       $count($asArray($e.billingPlan.newInstallments)),
+            "cancelledInstallments": $count($asArray($e.billingPlan.cancelledInstallments)),
+            "adhocInstallments":     $count($asArray($e.billingPlan.adhocInstallments))
+          }
+        }
+      )})
+    ),
+
+    "metadata": {
+      "extractedAt":     extractedAt,
+      "stagingDocId":    _id,
+      "dataQualityFlags": {
+        "hasUnpaidPeriods":           $totalUnpaidEarned > 0,
+        "hasPriorPeriodAdjustments":  $count($asArray($priorAdjustments)) > 0,
+        "hasAdhocRefunds":            $count($asArray($adhocRefunds)) > 0,
+        "hasAdhocCharges":            $count($asArray(installments[installmentTimingType = "AD_HOC" and installmentType = "CHARGE"])) > 0,
+        "hasCancellation":            policy.cancellationDate != null,
+        "hasEndorsements":            $count($asArray(endorsements)) > 0,
+        "paidToDateCurrent":          policy.paidToDate != null and policy.paidToDate >= $reportEnd
+      }
+    }
+  }
+)

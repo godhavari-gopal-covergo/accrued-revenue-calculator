@@ -5,7 +5,7 @@
  * policy and writes a normalised staging JSON into runs/<runId>/.
  *
  * Usage:
- *   npx ts-node extract-policy.ts \
+ *   npx ts-node src/extract-policy.ts \
  *     --policyId <uuid> \
  *     --endpoint <graphql-url> \
  *     --token <bearer-token> \
@@ -505,7 +505,7 @@ async function main() {
 
   // ── Write to runs/<runId>/ ──
   const runId = ts;
-  const runDir = path.resolve(__dirname, 'runs', runId);
+  const runDir = path.resolve(__dirname, '..', 'runs', runId);
   fs.mkdirSync(runDir, { recursive: true });
   const filePrefix = policyNumberFilePrefix(pp.policyIssuerNumber);
   const filename = `${filePrefix}_${periodStr}_${ts}.json`;

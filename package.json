@@ -7,9 +7,9 @@
     "url": "https://github.com/godhavari-gopal-covergo/accrued-revenue-calculator.git"
   },
   "scripts": {
-    "extract": "npx ts-node extract-policy.ts",
-    "calculate": "npx ts-node calculate-earned-premium.ts",
-    "fetch-token": "npx ts-node auth/fetch-token.ts"
+    "extract": "npx ts-node src/extract-policy.ts",
+    "calculate": "npx ts-node src/calculate-earned-premium.ts",
+    "fetch-token": "npx ts-node src/auth/fetch-token.ts"
   },
   "dependencies": {
     "jsonata": "^2.0.5"

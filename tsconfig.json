@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["*.ts", "auth/*.ts"]
+  "include": ["src/**/*.ts"]
 }

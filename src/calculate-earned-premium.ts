@@ -1,15 +1,14 @@
 /**
- * Stage 2 — Calculate earned premium from intermediate staging JSONs
+ * Stage 2 — Calculate earned premium from staging JSONs in runs/<runId>/
  *
  * Reads staging documents from a specific run folder (runs/<runId>/),
  * runs the JSONata earned premium transformation on each, and writes
  * per-policy report JSONs and a combined JSONL back into the same run folder.
  *
  * Usage:
- *   npx ts-node calculate-earned-premium.ts --run <runId> [--year 2026] [--month 3]
+ *   npx ts-node src/calculate-earned-premium.ts --run <runId> [--year 2026] [--month 3]
  *
- * Reuses the JSONata expression from:
- *   ../src/transformation/earned-premium.jsonata
+ * JSONata expression: src/transformation/earned-premium.jsonata
  */
 
 import * as fs from 'fs';
@@ -78,8 +77,7 @@ async function main() {
 
   console.log(`\n  Stage 2 — Earned Premium Calculation for ${periodStr}  (run: ${run})\n`);
 
-  // ── Load JSONata expression from parent project ──
-  const jsonataPath = path.resolve(__dirname, '..', 'src', 'transformation', 'earned-premium.jsonata');
+  const jsonataPath = path.resolve(__dirname, 'transformation', 'earned-premium.jsonata');
   if (!fs.existsSync(jsonataPath)) {
     console.error(`  JSONata expression not found at: ${jsonataPath}`);
     process.exit(1);
@@ -93,7 +91,7 @@ async function main() {
   console.log(`  JSONata loaded from: ${path.relative(process.cwd(), jsonataPath)}\n`);
 
   // ── Discover staging files in the run folder ──
-  const runDir = path.resolve(__dirname, 'runs', run);
+  const runDir = path.resolve(__dirname, '..', 'runs', run);
   if (!fs.existsSync(runDir)) {
     console.error(`  Run folder not found: runs/${run}\n  Run extract-policy.ts first (Stage 1).`);
     process.exit(1);

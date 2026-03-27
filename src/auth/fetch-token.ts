@@ -1,8 +1,8 @@
 /**
  * Fetches a fresh API access token via token_2 GraphQL mutation.
- * Lives under auth/ only — not imported by extract-policy or calculate-earned-premium.
+ * Lives under src/auth/ only — not imported by extract-policy or calculate-earned-premium.
  *
- * Usage (from AccruedRevenue/):
+ * Usage (repository root AccruedRevenue/):
  *   npm run fetch-token
  *
  * Loads auth/credentials.env if present (see credentials.example.env).
